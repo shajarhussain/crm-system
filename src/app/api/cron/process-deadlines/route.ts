@@ -31,6 +31,32 @@ export async function GET(request: Request) {
       processedCount++;
     }
 
+    // 24-hour NO FOLLOW UP check
+    const activeLeads = await adminDb.collection("leads").where("status", "in", ["ASSIGNED", "ACCEPTED"]).get();
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    for (const doc of activeLeads.docs) {
+      const followUps = await doc.ref.collection("followUps").orderBy("createdAt", "desc").limit(1).get();
+      
+      let lastActivityTime = doc.data().assignedAt?.toDate() || doc.data().createdAt?.toDate();
+      if (!followUps.empty) {
+        lastActivityTime = followUps.docs[0].data().createdAt?.toDate();
+      }
+
+      if (lastActivityTime && lastActivityTime < twentyFourHoursAgo) {
+        const notifId = `nofup_${doc.id}`;
+        await adminDb.collection("notifications").doc(notifId).set({
+          type: "NO_FOLLOWUP",
+          leadId: doc.id,
+          targetRole: "admin",
+          payload: { message: "Lead has no follow-up in 24 hours." },
+          createdAt: FieldValue.serverTimestamp(),
+          readAt: null
+        }, { merge: true });
+        processedCount++;
+      }
+    }
+
     return NextResponse.json({ success: true, processedCount });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
