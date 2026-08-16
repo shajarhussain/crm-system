@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/server';
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Transaction, QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { getNextAssigneeAndState, Employee, CycleState } from '@/lib/distribution';
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
     const now = new Date();
     
@@ -64,7 +64,7 @@ export async function GET(request: Request) {
 }
 
 async function autoAssignLead(leadId: string) {
-  await adminDb.runTransaction(async (t) => {
+  await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
 
@@ -72,7 +72,7 @@ async function autoAssignLead(leadId: string) {
 
     const usersSnap = await t.get(adminDb.collection("users"));
     const employees: Employee[] = [];
-    usersSnap.forEach(doc => {
+    usersSnap.forEach((doc: QueryDocumentSnapshot) => {
       const d = doc.data();
       if (d.role === "employee") {
         employees.push({ uid: doc.id, priority: d.priority || 99, status: d.status || "ACTIVE" });
@@ -102,7 +102,7 @@ async function autoAssignLead(leadId: string) {
 }
 
 async function reassignLead(leadId: string, oldAssignee: string) {
-  await adminDb.runTransaction(async (t) => {
+  await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
 
@@ -121,7 +121,7 @@ async function reassignLead(leadId: string, oldAssignee: string) {
 
     const usersSnap = await t.get(adminDb.collection("users"));
     const employees: Employee[] = [];
-    usersSnap.forEach(doc => {
+    usersSnap.forEach((doc: QueryDocumentSnapshot) => {
       const d = doc.data();
       if (d.role === "employee" && doc.id !== oldAssignee) {
         employees.push({ uid: doc.id, priority: d.priority || 99, status: d.status || "ACTIVE" });

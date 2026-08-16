@@ -1,7 +1,7 @@
 "use server";
 
 import { adminDb, adminAuth } from "@/lib/firebase/server";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Transaction } from "firebase-admin/firestore";
 
 async function verifyAuth(token: string) {
   try {
@@ -18,7 +18,7 @@ export async function closeDeal(token: string, leadId: string, amountReceived: n
 
   const profit = amountReceived - payableAmount;
 
-  await adminDb.runTransaction(async (t) => {
+  await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
     if (!leadSnap.exists) throw new Error("Not found");

@@ -1,7 +1,7 @@
 "use server";
 
 import { adminDb, adminAuth } from "@/lib/firebase/server";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Transaction } from "firebase-admin/firestore";
 
 async function verifyAuth(token: string) {
   try {
@@ -15,7 +15,7 @@ export async function assignLead(token: string, leadId: string, userId: string) 
   const decoded = await verifyAuth(token);
   if (decoded.role !== "admin") throw new Error("Permission denied");
 
-  await adminDb.runTransaction(async (t) => {
+  await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
 
@@ -42,7 +42,7 @@ export async function acceptLead(token: string, leadId: string) {
   
   const uid = decoded.uid;
 
-  await adminDb.runTransaction(async (t) => {
+  await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
 
