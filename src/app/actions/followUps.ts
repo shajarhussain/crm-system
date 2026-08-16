@@ -11,7 +11,14 @@ async function verifyAuth(token: string) {
   }
 }
 
-export async function addFollowUp(token: string, leadId: string, message: string, callMade: boolean, whatsappNote: string) {
+export async function addFollowUp(
+  token: string, 
+  leadId: string, 
+  message: string, 
+  callMade: boolean, 
+  whatsappNote: string,
+  callCount: number = 1
+) {
   const decoded = await verifyAuth(token);
   const uid = decoded.uid;
   const role = decoded.role;
@@ -19,14 +26,17 @@ export async function addFollowUp(token: string, leadId: string, message: string
   await adminDb.runTransaction(async (t: Transaction) => {
     const leadRef = adminDb.collection("leads").doc(leadId);
     const leadSnap = await t.get(leadRef);
-    if (!leadSnap.exists) throw new Error("Not found");
+    if (!leadSnap.exists) throw new Error("Lead not found");
     
     const data = leadSnap.data();
     if (role !== "admin" && data?.assignedUserId !== uid) throw new Error("Permission denied");
 
     const followUpRef = leadRef.collection("followUps").doc();
     t.set(followUpRef, {
-      message, callMade: !!callMade, whatsappNote,
+      message,
+      callMade: !!callMade,
+      callCount: callCount || 1,
+      whatsappNote: whatsappNote || "",
       occurredAt: FieldValue.serverTimestamp(),
       createdAt: FieldValue.serverTimestamp(),
       authorUid: uid
@@ -34,8 +44,10 @@ export async function addFollowUp(token: string, leadId: string, message: string
 
     const eventRef = leadRef.collection("events").doc();
     t.set(eventRef, {
-      type: "FOLLOW_UP_ADDED", actorUid: uid,
-      at: FieldValue.serverTimestamp(), meta: { followUpId: followUpRef.id }
+      type: "FOLLOW_UP_ADDED",
+      actorUid: uid,
+      at: FieldValue.serverTimestamp(),
+      meta: { followUpId: followUpRef.id, callMade, callCount }
     });
   });
   return { success: true };

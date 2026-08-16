@@ -2,33 +2,32 @@
 
 import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { auth } from "@/lib/firebase/client";
 import { useLeads, Lead } from "@/hooks/useLeads";
 import { LeadCard } from "@/components/LeadCard";
-import { Modal } from "@/components/ui/Modal";
+import { LeadDetailModal } from "@/components/LeadDetailModal";
 import { acceptLead } from "@/app/actions/leads";
-import { addFollowUp } from "@/app/actions/followUps";
-import { closeDeal } from "@/app/actions/closedDeals";
+import { 
+  Search, 
+  Filter, 
+  Briefcase, 
+  CheckCircle, 
+  Clock, 
+  UserCheck
+} from "lucide-react";
 
 export default function EmployeeDashboard() {
   const { user, role, loading } = useAuth();
   const router = useRouter();
   const { leads, loading: leadsLoading } = useLeads('employee', user?.uid);
 
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   
-  // Follow-up state
-  const [followUpLead, setFollowUpLead] = useState<Lead | null>(null);
-  const [fuMsg, setFuMsg] = useState("");
-  const [fuCall, setFuCall] = useState(false);
-  const [isSubmittingFu, setIsSubmittingFu] = useState(false);
-
-  // Close deal state
-  const [closeLead, setCloseLead] = useState<Lead | null>(null);
-  const [amount, setAmount] = useState("");
-  const [payable, setPayable] = useState("");
-  const [isClosing, setIsClosing] = useState(false);
+  // Selected Lead for Detail Modal
+  const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
 
   useEffect(() => {
     if (!loading && (!user || role !== "employee")) {
@@ -36,17 +35,33 @@ export default function EmployeeDashboard() {
     }
   }, [user, role, loading, router]);
 
+  const filteredLeads = useMemo(() => {
+    return leads.filter(l => {
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        const matchesName = l.name?.toLowerCase().includes(q);
+        const matchesPhone = l.phone?.toLowerCase().includes(q);
+        const matchesEmail = l.email?.toLowerCase().includes(q);
+        if (!matchesName && !matchesPhone && !matchesEmail) return false;
+      }
+      if (statusFilter !== "ALL" && l.status !== statusFilter) return false;
+      return true;
+    });
+  }, [leads, searchQuery, statusFilter]);
+
   if (loading || leadsLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600"></div>
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500"></div>
       </div>
     );
   }
+  
   if (!user || role !== "employee") return null;
 
-  const assignedLeads = leads.filter(l => l.status === "ASSIGNED");
-  const acceptedLeads = leads.filter(l => l.status === "ACCEPTED");
+  const assignedLeads = filteredLeads.filter(l => l.status === "ASSIGNED");
+  const activeLeads = filteredLeads.filter(l => l.status !== "ASSIGNED" && l.status !== "CLOSED_WON" && l.status !== "CLOSED_LOST");
+  const closedLeads = filteredLeads.filter(l => l.status === "CLOSED_WON");
 
   const handleAccept = async (leadId: string) => {
     setAcceptingId(leadId);
@@ -60,69 +75,115 @@ export default function EmployeeDashboard() {
     }
   };
 
-  const submitFollowUp = async () => {
-    if (!followUpLead || !fuMsg) return;
-    setIsSubmittingFu(true);
-    try {
-      const token = await user.getIdToken();
-      await addFollowUp(token, followUpLead.id, fuMsg, fuCall, "");
-      setFollowUpLead(null);
-      setFuMsg("");
-      setFuCall(false);
-    } catch (e: any) {
-      alert("Error: " + e.message);
-    } finally {
-      setIsSubmittingFu(false);
-    }
-  };
-
-  const submitCloseDeal = async () => {
-    if (!closeLead || !amount || !payable) return;
-    setIsClosing(true);
-    try {
-      const token = await user.getIdToken();
-      await closeDeal(token, closeLead.id, parseFloat(amount), parseFloat(payable));
-      setCloseLead(null);
-      setAmount("");
-      setPayable("");
-    } catch (e: any) {
-      alert("Error: " + e.message);
-    } finally {
-      setIsClosing(false);
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
-      <header className="bg-white/80 backdrop-blur-md sticky top-0 z-40 border-b border-gray-200">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      {/* Top Header */}
+      <header className="bg-slate-900/80 backdrop-blur-md sticky top-0 z-40 border-b border-slate-800 shadow-xl">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-700 to-pink-600 tracking-tight">My Workspace</h1>
-          <div className="flex items-center space-x-4">
-            <span className="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1 rounded-full">{user.email}</span>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-blue-500 flex items-center justify-center text-white shadow-md shadow-indigo-600/30">
+              <Briefcase size={20} />
+            </div>
+            <div>
+              <h1 className="text-lg font-extrabold tracking-tight text-white">Employee Workspace</h1>
+              <p className="text-[11px] text-slate-400">My Leads & Follow-ups</p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-5">
+            <span className="text-xs font-semibold text-slate-400 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-800">
+              {user.email}
+            </span>
             <button 
               onClick={() => auth.signOut()}
-              className="text-sm font-semibold text-red-600 hover:text-red-700 transition-colors"
+              className="text-xs font-bold text-red-400 hover:text-red-300 transition-colors"
             >
               Sign Out
             </button>
           </div>
         </div>
       </header>
+
+      {/* Filter Toolbar */}
+      <div className="bg-slate-900/40 border-b border-slate-800 px-4 sm:px-6 lg:px-8 py-3">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="relative flex-1 min-w-[240px] max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+            <input 
+              type="text" 
+              placeholder="Search my leads by name, phone, email..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
+            />
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800">
+            <Filter size={13} className="text-slate-400" />
+            <span className="text-slate-400 font-semibold">Filter:</span>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="bg-transparent text-white font-semibold outline-none cursor-pointer"
+            >
+              <option value="ALL" className="bg-slate-900">All My Leads</option>
+              <option value="ASSIGNED" className="bg-slate-900">Needs Acceptance</option>
+              <option value="ACCEPTED" className="bg-slate-900">Accepted</option>
+              <option value="CONTACTED" className="bg-slate-900">Contacted</option>
+              <option value="FOLLOW_UP" className="bg-slate-900">Follow-Up</option>
+              <option value="INTERESTED" className="bg-slate-900">Interested</option>
+              <option value="NEGOTIATION" className="bg-slate-900">Negotiation</option>
+              <option value="CLOSED_WON" className="bg-slate-900">Closed Won</option>
+            </select>
+          </div>
+        </div>
+      </div>
       
-      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full space-y-12">
+      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full space-y-10">
         
-        {/* New Assignments */}
-        <section>
-          <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-            Needs Acceptance
-            {assignedLeads.length > 0 && <span className="bg-red-100 text-red-600 text-xs px-2 py-0.5 rounded-full animate-pulse">{assignedLeads.length}</span>}
+        {/* KPI Strip */}
+        <section className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+          <div className="p-6 bg-slate-900 rounded-2xl border border-slate-800 space-y-1">
+            <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider">
+              <span>Needs Acceptance</span>
+              <Clock size={16} className="text-amber-400" />
+            </div>
+            <p className="text-3xl font-black text-amber-400 tracking-tight">{assignedLeads.length}</p>
+            <p className="text-xs text-slate-500">10-minute acceptance SLA</p>
+          </div>
+
+          <div className="p-6 bg-slate-900 rounded-2xl border border-slate-800 space-y-1">
+            <div className="flex justify-between items-center text-slate-400 text-xs font-bold uppercase tracking-wider">
+              <span>Active Pipeline</span>
+              <UserCheck size={16} className="text-indigo-400" />
+            </div>
+            <p className="text-3xl font-black text-white tracking-tight">{activeLeads.length}</p>
+            <p className="text-xs text-slate-500">Leads currently in communication</p>
+          </div>
+
+          <div className="p-6 bg-gradient-to-br from-emerald-950/40 to-slate-900 rounded-2xl border border-emerald-500/30 space-y-1">
+            <div className="flex justify-between items-center text-emerald-400 text-xs font-bold uppercase tracking-wider">
+              <span>Closed Won</span>
+              <CheckCircle size={16} />
+            </div>
+            <p className="text-3xl font-black text-emerald-400 tracking-tight">{closedLeads.length}</p>
+            <p className="text-xs text-emerald-500/80">Converted deals</p>
+          </div>
+        </section>
+
+        {/* Section 1: Needs Acceptance (10-min SLA) */}
+        <section className="space-y-4">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+            Needs Acceptance (10-Min Window)
+            {assignedLeads.length > 0 && <span className="bg-red-500/20 text-red-400 text-xs px-2.5 py-0.5 rounded-full border border-red-500/30 animate-pulse">{assignedLeads.length}</span>}
           </h2>
+
           {assignedLeads.length === 0 ? (
-            <div className="bg-white rounded-2xl border border-dashed border-gray-300 p-8 text-center">
-              <p className="text-gray-500 font-medium">You have no new leads to accept.</p>
+            <div className="bg-slate-900/50 rounded-2xl border border-dashed border-slate-800 p-8 text-center text-slate-500 text-xs">
+              No new leads waiting for your acceptance.
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {assignedLeads.map(lead => (
                 <LeadCard 
                   key={lead.id} 
@@ -135,98 +196,56 @@ export default function EmployeeDashboard() {
           )}
         </section>
 
-        {/* My Pipeline */}
-        <section>
-          <h2 className="text-xl font-bold text-gray-900 mb-6">My Active Pipeline</h2>
-          {acceptedLeads.length === 0 ? (
-            <div className="bg-white rounded-2xl border border-dashed border-gray-300 p-12 text-center">
-              <p className="text-gray-500 font-medium">No active leads in your pipeline.</p>
+        {/* Section 2: Active Pipeline */}
+        <section className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-white">My Working Pipeline ({activeLeads.length})</h2>
+            <p className="text-xs text-slate-400">Click any card to view full timeline, log calls/WhatsApp, or close deal</p>
+          </div>
+
+          {activeLeads.length === 0 ? (
+            <div className="bg-slate-900/50 rounded-2xl border border-dashed border-slate-800 p-8 text-center text-slate-500 text-xs">
+              No active leads in your working pipeline.
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {acceptedLeads.map(lead => (
-                <div key={lead.id} className="relative group">
-                  <LeadCard lead={lead} />
-                  <div className="absolute inset-0 bg-gray-900/40 rounded-2xl opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center justify-center gap-3 backdrop-blur-[2px]">
-                    <button 
-                      onClick={() => setFollowUpLead(lead)}
-                      className="bg-white text-gray-900 font-semibold px-4 py-2.5 rounded-xl shadow-lg hover:bg-gray-50 transition-transform hover:scale-105"
-                    >
-                      Follow-up
-                    </button>
-                    <button 
-                      onClick={() => setCloseLead(lead)}
-                      className="bg-green-500 text-white font-semibold px-4 py-2.5 rounded-xl shadow-lg hover:bg-green-600 transition-transform hover:scale-105"
-                    >
-                      Close Deal
-                    </button>
-                  </div>
-                </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {activeLeads.map(lead => (
+                <LeadCard 
+                  key={lead.id} 
+                  lead={lead} 
+                  onClick={() => setSelectedLead(lead)}
+                  actionText="Open Profile"
+                />
               ))}
             </div>
           )}
         </section>
+
+        {/* Section 3: Closed Deals */}
+        {closedLeads.length > 0 && (
+          <section className="space-y-4">
+            <h2 className="text-lg font-bold text-emerald-400">My Closed Deals ({closedLeads.length})</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+              {closedLeads.map(lead => (
+                <LeadCard 
+                  key={lead.id} 
+                  lead={lead} 
+                  onClick={() => setSelectedLead(lead)}
+                  actionText="View Closed Deal"
+                />
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
-      <Modal isOpen={!!followUpLead} onClose={() => setFollowUpLead(null)} title="Log Follow-up">
-        <div className="space-y-5">
-          <textarea
-            placeholder="What happened during this follow-up?"
-            value={fuMsg}
-            onChange={(e) => setFuMsg(e.target.value)}
-            className="w-full bg-gray-50 border border-gray-300 rounded-xl p-4 text-gray-900 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none h-32 resize-none transition-all"
-          />
-          <label className="flex items-center gap-3 cursor-pointer p-2 hover:bg-gray-50 rounded-lg transition-colors">
-            <input type="checkbox" checked={fuCall} onChange={(e) => setFuCall(e.target.checked)} className="w-5 h-5 text-purple-600 rounded border-gray-300 focus:ring-purple-500" />
-            <span className="text-gray-700 font-medium select-none">Was a call made?</span>
-          </label>
-          <button
-            disabled={!fuMsg || isSubmittingFu}
-            onClick={submitFollowUp}
-            className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-md hover:shadow-lg mt-4 flex justify-center"
-          >
-            {isSubmittingFu ? "Logging..." : "Save Follow-up"}
-          </button>
-        </div>
-      </Modal>
-
-      <Modal isOpen={!!closeLead} onClose={() => setCloseLead(null)} title="Close Deal">
-        <div className="space-y-5">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">Amount Received ($)</label>
-            <input
-              type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-300 rounded-xl p-3.5 text-gray-900 font-medium focus:ring-2 focus:ring-green-500 outline-none transition-all"
-              placeholder="e.g. 5000"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1.5">Payable Amount ($)</label>
-            <input
-              type="number"
-              value={payable}
-              onChange={(e) => setPayable(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-300 rounded-xl p-3.5 text-gray-900 font-medium focus:ring-2 focus:ring-green-500 outline-none transition-all"
-              placeholder="e.g. 4000"
-            />
-          </div>
-          <div className="bg-green-50 text-green-800 p-4 rounded-xl border border-green-200 mt-2">
-            <p className="text-sm font-medium">Estimated Net Profit</p>
-            <p className="text-2xl font-bold tracking-tight">
-              ${(parseFloat(amount || '0') - parseFloat(payable || '0')).toFixed(2)}
-            </p>
-          </div>
-          <button
-            disabled={!amount || !payable || isClosing}
-            onClick={submitCloseDeal}
-            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-md hover:shadow-lg mt-4 flex justify-center"
-          >
-            {isClosing ? "Closing..." : "Confirm & Close Deal"}
-          </button>
-        </div>
-      </Modal>
+      {/* Comprehensive Lead Detail Modal */}
+      <LeadDetailModal 
+        lead={selectedLead} 
+        onClose={() => setSelectedLead(null)} 
+        userRole="employee"
+        getIdToken={() => user.getIdToken()}
+      />
     </div>
   );
 }
