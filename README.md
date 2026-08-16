@@ -12,8 +12,8 @@ A centralized Lead Management & CRM Platform designed to ingest leads from Meta 
 
 ## Architecture
 
-- **Frontend**: Next.js App Router.
-- **Backend & Business Logic**: Cloud Functions for Firebase.
-- **Database**: Cloud Firestore.
-- **Task Scheduling**: Cloud Tasks for business-critical SLA monitoring.
-- **Authentication**: Firebase Auth with custom role claims.
+- **Frontend & Serverless Engine**: Next.js App Router (Server Actions & Route Handlers).
+- **Database & Storage**: Google Cloud Firestore & Firebase Storage.
+- **Task & SLA Enforcement**: Lazy evaluation cron integration for business-critical deadline management.
+- **Authentication**: Firebase Authentication with custom claims for strict role isolation.
+
