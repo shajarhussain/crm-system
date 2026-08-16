@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 
 export default function EmployeeDashboard() {
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, logout } = useAuth();
   const router = useRouter();
   const { leads, loading: leadsLoading } = useLeads('employee', user?.uid);
 
@@ -95,7 +95,7 @@ export default function EmployeeDashboard() {
               {user.email}
             </span>
             <button 
-              onClick={() => auth.signOut()}
+              onClick={logout}
               className="text-xs font-bold text-red-400 hover:text-red-300 transition-colors"
             >
               Sign Out

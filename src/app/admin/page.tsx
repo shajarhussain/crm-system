@@ -41,7 +41,7 @@ const EXPENSE_CATEGORIES = [
 ];
 
 export default function AdminDashboard() {
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, logout } = useAuth();
   const router = useRouter();
   const { leads, loading: leadsLoading } = useLeads('admin');
   const { employees, loading: empLoading } = useEmployees();
@@ -257,7 +257,7 @@ export default function AdminDashboard() {
               {user.email}
             </span>
             <button 
-              onClick={() => auth.signOut()}
+              onClick={logout}
               className="text-xs font-bold text-red-400 hover:text-red-300 transition-colors"
             >
               Sign Out

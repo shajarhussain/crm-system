@@ -5,7 +5,7 @@ import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "@/lib/firebase/client";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
-import { ShieldCheck, ArrowRight, Lock, Mail } from "lucide-react";
+import { ShieldCheck, ArrowRight, Lock, Mail, UserCheck } from "lucide-react";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -13,7 +13,7 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
-  const { user, role, loading } = useAuth();
+  const { user, role, loading, loginAsDemo } = useAuth();
 
   if (!loading && user) {
     if (role === "admin") router.push("/admin");
@@ -27,9 +27,17 @@ export default function LoginPage() {
     try {
       await signInWithEmailAndPassword(auth, email, password);
     } catch (err: any) {
-      setError(err.message || "Failed to sign in");
+      setError(err.message || "Failed to sign in. Please verify your credentials or use Quick Preview below.");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleDemoLogin = (demoRole: "admin" | "employee") => {
+    if (loginAsDemo) {
+      loginAsDemo(demoRole);
+      if (demoRole === "admin") router.push("/admin");
+      else router.push("/employee");
     }
   };
 
@@ -47,16 +55,16 @@ export default function LoginPage() {
       <div className="absolute -top-40 -left-40 w-96 h-96 bg-indigo-600/20 rounded-full blur-3xl pointer-events-none"></div>
       <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-blue-600/20 rounded-full blur-3xl pointer-events-none"></div>
 
-      <div className="relative w-full max-w-md p-8 bg-slate-900/80 backdrop-blur-xl rounded-3xl shadow-2xl border border-slate-800 space-y-8">
+      <div className="relative w-full max-w-md p-8 bg-slate-900/80 backdrop-blur-xl rounded-3xl shadow-2xl border border-slate-800 space-y-7">
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-blue-500 text-white shadow-lg shadow-indigo-500/25 mb-2">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-blue-500 text-white shadow-lg shadow-indigo-500/25 mb-1">
             <ShieldCheck size={28} />
           </div>
           <h2 className="text-3xl font-extrabold tracking-tight text-white">CRM System</h2>
-          <p className="text-sm text-slate-400">Enterprise Lead & Distribution Platform</p>
+          <p className="text-xs text-slate-400">Enterprise Lead & Distribution Platform</p>
         </div>
 
-        <form onSubmit={handleLogin} className="space-y-5">
+        <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-1.5">
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
               Email Address
@@ -106,9 +114,30 @@ export default function LoginPage() {
             {!isSubmitting && <ArrowRight size={16} />}
           </button>
         </form>
+
+        {/* Quick Demo Access for browser audit & instant testing */}
+        <div className="pt-4 border-t border-slate-800/80 space-y-3">
+          <p className="text-[11px] font-bold text-center uppercase tracking-wider text-slate-500">
+            Instant Preview Access
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={() => handleDemoLogin("admin")}
+              className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 transition-colors"
+            >
+              <ShieldCheck size={14} className="text-indigo-400" /> Admin Console
+            </button>
+            <button
+              onClick={() => handleDemoLogin("employee")}
+              className="flex items-center justify-center gap-1.5 py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 transition-colors"
+            >
+              <UserCheck size={14} className="text-emerald-400" /> Employee View
+            </button>
+          </div>
+        </div>
       </div>
 
-      <p className="mt-8 text-xs text-slate-500">Protected by role-based access control & Firestore security</p>
+      <p className="mt-6 text-xs text-slate-500">Protected by role-based access control & Firestore security</p>
     </div>
   );
 }
