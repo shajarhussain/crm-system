@@ -1,14 +1,7 @@
 "use server";
 import { adminDb, adminAuth } from "@/lib/firebase/server";
+import { verifyAuth } from "@/lib/firebase/serverAuth";
 import { FieldValue } from "firebase-admin/firestore";
-
-async function verifyAuth(token: string) {
-  try {
-    return await adminAuth.verifyIdToken(token);
-  } catch (e) {
-    throw new Error("Unauthorized");
-  }
-}
 
 export async function createEmployee(token: string, email: string, password: string, priority: number) {
   const decoded = await verifyAuth(token);

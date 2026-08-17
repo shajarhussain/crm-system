@@ -53,8 +53,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         if (demoRole === "admin" || demoRole === "employee") {
           setUser({
             uid: demoRole === "admin" ? "demo-admin-uid" : "demo-emp-1",
-            email: demoRole === "admin" ? "admin@crm.com" : "employee1@crm.com",
-            getIdToken: async () => "demo-token"
+            email: demoRole === "admin" ? "admin@crm.com" : "sarah.sales@company.com",
+            getIdToken: async () => demoRole === "admin" ? "demo-admin-token" : "demo-employee-token"
           } as any);
           setRole(demoRole);
         } else {
@@ -72,8 +72,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     sessionStorage.setItem("demo_role", demoRole);
     setUser({
       uid: demoRole === "admin" ? "demo-admin-uid" : "demo-emp-1",
-      email: demoRole === "admin" ? "admin@crm.com" : "employee1@crm.com",
-      getIdToken: async () => "demo-token"
+      email: demoRole === "admin" ? "admin@crm.com" : "sarah.sales@company.com",
+      getIdToken: async () => demoRole === "admin" ? "demo-admin-token" : "demo-employee-token"
     } as any);
     setRole(demoRole);
   };

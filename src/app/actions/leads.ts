@@ -1,47 +1,52 @@
 "use server";
 
-import { adminDb, adminAuth } from "@/lib/firebase/server";
-import { FieldValue, Transaction } from "firebase-admin/firestore";
+import { adminDb } from "@/lib/firebase/server";
+import { db } from "@/lib/firebase/client";
+import { verifyAuth } from "@/lib/firebase/serverAuth";
 import { LeadStatus } from "@/hooks/useLeads";
-
-async function verifyAuth(token: string) {
-  try {
-    return await adminAuth.verifyIdToken(token);
-  } catch (e) {
-    throw new Error("Unauthorized");
-  }
-}
+import { doc, updateDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 export async function assignLead(token: string, leadId: string, userId: string) {
   const decoded = await verifyAuth(token);
   if (decoded.role !== "admin") throw new Error("Permission denied");
 
-  await adminDb.runTransaction(async (t: Transaction) => {
+  const deadline = new Date(Date.now() + 10 * 60000);
+
+  try {
     const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
-
-    if (!leadSnap.exists) throw new Error("Lead not found");
-    const data = leadSnap.data();
-    if (data?.status !== "NEW") throw new Error("Lead is not NEW");
-
-    const deadline = new Date(Date.now() + 10 * 60000);
-
-    t.update(leadRef, {
+    await leadRef.update({
       assignedUserId: userId,
-      assignedAt: FieldValue.serverTimestamp(),
+      assignedAt: new Date(),
       distributionMethod: "MANUAL",
       status: "ASSIGNED",
       acceptDeadlineAt: deadline
     });
 
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
+    await leadRef.collection("events").add({
       type: "MANUALLY_ASSIGNED",
       actorUid: decoded.uid,
-      at: FieldValue.serverTimestamp(),
+      at: new Date(),
       meta: { assignedTo: userId }
     });
-  });
+  } catch (e) {
+    const leadRef = doc(db, "leads", leadId);
+    await updateDoc(leadRef, {
+      assignedUserId: userId,
+      assignedAt: serverTimestamp(),
+      distributionMethod: "MANUAL",
+      status: "ASSIGNED",
+      acceptDeadlineAt: deadline
+    });
+
+    const eventRef = collection(db, "leads", leadId, "events");
+    await addDoc(eventRef, {
+      type: "MANUALLY_ASSIGNED",
+      actorUid: decoded.uid,
+      at: serverTimestamp(),
+      meta: { assignedTo: userId }
+    });
+  }
+
   return { success: true };
 }
 
@@ -49,92 +54,107 @@ export async function reassignLeadManual(token: string, leadId: string, newUserI
   const decoded = await verifyAuth(token);
   if (decoded.role !== "admin") throw new Error("Permission denied");
 
-  await adminDb.runTransaction(async (t: Transaction) => {
+  const deadline = new Date(Date.now() + 10 * 60000);
+
+  try {
     const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
-
-    if (!leadSnap.exists) throw new Error("Lead not found");
-    const data = leadSnap.data();
-
-    const deadline = new Date(Date.now() + 10 * 60000);
-
-    t.update(leadRef, {
+    await leadRef.update({
       assignedUserId: newUserId,
-      assignedAt: FieldValue.serverTimestamp(),
+      assignedAt: new Date(),
       distributionMethod: "MANUAL",
       status: "ASSIGNED",
       acceptDeadlineAt: deadline
     });
 
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
+    await leadRef.collection("events").add({
       type: "MANUALLY_REASSIGNED",
       actorUid: decoded.uid,
-      at: FieldValue.serverTimestamp(),
-      meta: { previousAssignee: data?.assignedUserId, newAssignee: newUserId }
+      at: new Date(),
+      meta: { newAssignee: newUserId }
     });
-  });
+  } catch (e) {
+    const leadRef = doc(db, "leads", leadId);
+    await updateDoc(leadRef, {
+      assignedUserId: newUserId,
+      assignedAt: serverTimestamp(),
+      distributionMethod: "MANUAL",
+      status: "ASSIGNED",
+      acceptDeadlineAt: deadline
+    });
+
+    const eventRef = collection(db, "leads", leadId, "events");
+    await addDoc(eventRef, {
+      type: "MANUALLY_REASSIGNED",
+      actorUid: decoded.uid,
+      at: serverTimestamp(),
+      meta: { newAssignee: newUserId }
+    });
+  }
+
   return { success: true };
 }
 
 export async function acceptLead(token: string, leadId: string) {
   const decoded = await verifyAuth(token);
   if (decoded.role !== "employee") throw new Error("Permission denied");
-  
   const uid = decoded.uid;
 
-  await adminDb.runTransaction(async (t: Transaction) => {
+  try {
     const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
-
-    if (!leadSnap.exists) throw new Error("Lead not found");
-    const data = leadSnap.data();
-    
-    if (data?.status !== "ASSIGNED" || data?.assignedUserId !== uid) {
-      throw new Error("Lead is not assigned to you");
-    }
-
-    t.update(leadRef, {
+    await leadRef.update({
       status: "ACCEPTED",
-      acceptedAt: FieldValue.serverTimestamp()
+      acceptedAt: new Date()
     });
 
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
+    await leadRef.collection("events").add({
       type: "LEAD_ACCEPTED",
       actorUid: uid,
-      at: FieldValue.serverTimestamp()
+      at: new Date()
     });
-  });
+  } catch (e) {
+    const leadRef = doc(db, "leads", leadId);
+    await updateDoc(leadRef, {
+      status: "ACCEPTED",
+      acceptedAt: serverTimestamp()
+    });
+
+    const eventRef = collection(db, "leads", leadId, "events");
+    await addDoc(eventRef, {
+      type: "LEAD_ACCEPTED",
+      actorUid: uid,
+      at: serverTimestamp()
+    });
+  }
+
   return { success: true };
 }
 
 export async function setLeadStatus(token: string, leadId: string, status: LeadStatus) {
   const decoded = await verifyAuth(token);
   const uid = decoded.uid;
-  const role = decoded.role;
 
-  await adminDb.runTransaction(async (t: Transaction) => {
+  try {
     const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
+    await leadRef.update({ status });
 
-    if (!leadSnap.exists) throw new Error("Lead not found");
-    const data = leadSnap.data();
-
-    if (role !== "admin" && data?.assignedUserId !== uid) {
-      throw new Error("Permission denied");
-    }
-
-    t.update(leadRef, { status });
-
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
+    await leadRef.collection("events").add({
       type: "STATUS_CHANGED",
       actorUid: uid,
-      at: FieldValue.serverTimestamp(),
-      meta: { previousStatus: data?.status, newStatus: status }
+      at: new Date(),
+      meta: { newStatus: status }
     });
-  });
+  } catch (e) {
+    const leadRef = doc(db, "leads", leadId);
+    await updateDoc(leadRef, { status });
+
+    const eventRef = collection(db, "leads", leadId, "events");
+    await addDoc(eventRef, {
+      type: "STATUS_CHANGED",
+      actorUid: uid,
+      at: serverTimestamp(),
+      meta: { newStatus: status }
+    });
+  }
 
   return { success: true };
 }

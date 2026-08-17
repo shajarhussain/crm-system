@@ -1,15 +1,9 @@
 "use server";
 
-import { adminDb, adminAuth } from "@/lib/firebase/server";
-import { FieldValue, Transaction } from "firebase-admin/firestore";
-
-async function verifyAuth(token: string) {
-  try {
-    return await adminAuth.verifyIdToken(token);
-  } catch (e) {
-    throw new Error("Unauthorized");
-  }
-}
+import { adminDb } from "@/lib/firebase/server";
+import { db } from "@/lib/firebase/client";
+import { verifyAuth } from "@/lib/firebase/serverAuth";
+import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 export async function addFollowUp(
   token: string, 
@@ -21,34 +15,46 @@ export async function addFollowUp(
 ) {
   const decoded = await verifyAuth(token);
   const uid = decoded.uid;
-  const role = decoded.role;
 
-  await adminDb.runTransaction(async (t: Transaction) => {
+  try {
     const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
-    if (!leadSnap.exists) throw new Error("Lead not found");
-    
-    const data = leadSnap.data();
-    if (role !== "admin" && data?.assignedUserId !== uid) throw new Error("Permission denied");
-
-    const followUpRef = leadRef.collection("followUps").doc();
-    t.set(followUpRef, {
+    const fuRef = leadRef.collection("followUps").doc();
+    await fuRef.set({
       message,
       callMade: !!callMade,
       callCount: callCount || 1,
       whatsappNote: whatsappNote || "",
-      occurredAt: FieldValue.serverTimestamp(),
-      createdAt: FieldValue.serverTimestamp(),
+      occurredAt: new Date(),
+      createdAt: new Date(),
       authorUid: uid
     });
 
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
+    await leadRef.collection("events").add({
       type: "FOLLOW_UP_ADDED",
       actorUid: uid,
-      at: FieldValue.serverTimestamp(),
-      meta: { followUpId: followUpRef.id, callMade, callCount }
+      at: new Date(),
+      meta: { followUpId: fuRef.id, callMade, callCount }
     });
-  });
+  } catch (e) {
+    const fuRef = collection(db, "leads", leadId, "followUps");
+    const fuDoc = await addDoc(fuRef, {
+      message,
+      callMade: !!callMade,
+      callCount: callCount || 1,
+      whatsappNote: whatsappNote || "",
+      occurredAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      authorUid: uid
+    });
+
+    const eventRef = collection(db, "leads", leadId, "events");
+    await addDoc(eventRef, {
+      type: "FOLLOW_UP_ADDED",
+      actorUid: uid,
+      at: serverTimestamp(),
+      meta: { followUpId: fuDoc.id, callMade, callCount }
+    });
+  }
+
   return { success: true };
 }
