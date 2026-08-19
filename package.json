@@ -1,12 +1,19 @@
 {
-  "name": "tempapp",
+  "name": "crm-system",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/lib/distribution.test.ts src/lib/money.test.ts",
+    "check": "npm run typecheck && npm run test && npm run lint",
+    "check-auth": "node --env-file=.env.local --experimental-strip-types scripts/check-auth.mts",
+    "set-admin-role": "node --env-file=.env.local --experimental-strip-types scripts/set-admin-role.mts",
+    "purge-demo-data": "node --env-file=.env.local --experimental-strip-types scripts/purge-demo-data.mts",
+    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes,storage"
   },
   "dependencies": {
     "firebase": "^12.17.1",

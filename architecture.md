@@ -3,6 +3,14 @@
 Companion to `PRD.md`. This is the document the coding agent should treat as the technical
 source of truth. `architecture-essentials.md` is the condensed version to keep loaded every session.
 
+> **The shipped system diverges from this document in three places.** There is no `/functions`
+> package (Server Actions on Vercel instead of Cloud Functions), no Cloud Tasks (durable
+> deadline timestamps swept by a cron route), and no separate Cloud Scheduler function (the
+> same sweep runs the no-follow-up scan). The security model, data model and business rules
+> below are all still accurate and still enforced. Read
+> **`docs/implementation-notes.md`** alongside this file for what was built instead, why, and
+> what it costs — chiefly that deadlines fire on the next sweep rather than to the second.
+
 ---
 
 ## 1. Tech Stack (Firebase + Vercel)

@@ -1,148 +1,355 @@
 import { NextResponse } from 'next/server';
 import { adminDb } from '@/lib/firebase/server';
 import { FieldValue, Transaction, QueryDocumentSnapshot } from 'firebase-admin/firestore';
-import { getNextAssigneeAndState, Employee, CycleState } from '@/lib/distribution';
+import { getNextAssigneeAndState, type Employee, type CycleState } from '@/lib/distribution';
+import { ACTIVE_STATUSES } from '@/lib/leadStatus';
 
-export async function GET() {
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
+
+const ACCEPT_WINDOW_MS = 10 * 60_000; // BR-7
+const DEFAULT_NO_FOLLOWUP_HOURS = 24; // FR-18 default, overridable via config
+const BATCH_LIMIT = 200;
+
+/**
+ * The deadline sweep — the engine behind BR-4 through BR-9 and FR-18.
+ *
+ * architecture.md §6 specifies Cloud Tasks, one durable job per deadline. This
+ * build runs on Vercel without Cloud Functions, so the equivalent guarantee is
+ * achieved differently: deadlines are stored as timestamps on the lead document
+ * and a scheduled sweep acts on whatever has expired. That survives redeploys
+ * for the same reason Cloud Tasks does — nothing is held in memory — but it
+ * trades precision for simplicity: a deadline fires on the next sweep, so the
+ * effective window is the SLA plus up to one cron interval.
+ *
+ * Every handler re-checks the lead's current state inside a transaction, so
+ * overlapping or repeated invocations are harmless.
+ */
+export async function GET(request: Request) {
+  const denied = rejectUnauthorized(request);
+  if (denied) return denied;
+
+  const startedAt = Date.now();
+
   try {
-    const now = new Date();
-    
-    // Process Expired NEW leads (Admin 5-min window missed)
-    const expiredNewLeads = await adminDb.collection("leads")
-      .where("status", "==", "NEW")
-      .where("adminAssignDeadlineAt", "<", now)
-      .get();
-      
-    // Process Expired ASSIGNED leads (Employee 10-min window missed)
-    const expiredAssignedLeads = await adminDb.collection("leads")
-      .where("status", "==", "ASSIGNED")
-      .where("acceptDeadlineAt", "<", now)
-      .get();
-      
-    let processedCount = 0;
-    
-    for (const doc of expiredNewLeads.docs) {
-      await autoAssignLead(doc.id);
-      processedCount++;
-    }
-    
-    for (const doc of expiredAssignedLeads.docs) {
-      await reassignLead(doc.id, doc.data().assignedUserId);
-      processedCount++;
-    }
+    const [autoAssigned, reassigned, reminded] = await Promise.all([
+      processExpiredNewLeads(),
+      processExpiredAssignments(),
+      processStaleLeads(),
+    ]);
 
-    // 24-hour NO FOLLOW UP check
-    const activeLeads = await adminDb.collection("leads").where("status", "in", ["ASSIGNED", "ACCEPTED"]).get();
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    for (const doc of activeLeads.docs) {
-      const followUps = await doc.ref.collection("followUps").orderBy("createdAt", "desc").limit(1).get();
-      
-      let lastActivityTime = doc.data().assignedAt?.toDate() || doc.data().createdAt?.toDate();
-      if (!followUps.empty) {
-        lastActivityTime = followUps.docs[0].data().createdAt?.toDate();
-      }
-
-      if (lastActivityTime && lastActivityTime < twentyFourHoursAgo) {
-        const notifId = `nofup_${doc.id}`;
-        await adminDb.collection("notifications").doc(notifId).set({
-          type: "NO_FOLLOWUP",
-          leadId: doc.id,
-          targetRole: "admin",
-          payload: { message: "Lead has no follow-up in 24 hours." },
-          createdAt: FieldValue.serverTimestamp(),
-          readAt: null
-        }, { merge: true });
-        processedCount++;
-      }
-    }
-
-    return NextResponse.json({ success: true, processedCount });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({
+      ok: true,
+      autoAssigned,
+      reassigned,
+      noFollowUpAlerts: reminded,
+      durationMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    console.error('[cron:process-deadlines]', error);
+    return NextResponse.json({ ok: false, error: 'Sweep failed' }, { status: 500 });
   }
 }
 
-async function autoAssignLead(leadId: string) {
-  await adminDb.runTransaction(async (t: Transaction) => {
-    const leadRef = adminDb.collection("leads").doc(leadId);
+/**
+ * Vercel Cron sends `Authorization: Bearer $CRON_SECRET` automatically when the
+ * environment variable is set. Any other scheduler must send the same header.
+ *
+ * Fails closed when the secret is missing: an unauthenticated endpoint here
+ * would let anyone on the internet trigger mass lead reassignment.
+ */
+function rejectUnauthorized(request: Request): NextResponse | null {
+  const secret = process.env.CRON_SECRET;
+
+  if (!secret) {
+    console.error('[cron] CRON_SECRET is not set — refusing to run.');
+    return NextResponse.json(
+      { ok: false, error: 'Scheduler is not configured.' },
+      { status: 503 }
+    );
+  }
+
+  if (request.headers.get('authorization') !== `Bearer ${secret}`) {
+    return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+  }
+
+  return null;
+}
+
+/** BR-5: the admin's 5 minutes elapsed, so auto-distribution takes over. */
+async function processExpiredNewLeads(): Promise<number> {
+  const expired = await adminDb
+    .collection('leads')
+    .where('status', '==', 'NEW')
+    .where('adminAssignDeadlineAt', '<', new Date())
+    .limit(BATCH_LIMIT)
+    .get();
+
+  let count = 0;
+  for (const doc of expired.docs) {
+    try {
+      if (await autoAssignLead(doc.id)) count++;
+    } catch (error) {
+      console.error(`[cron] Auto-assign failed for lead ${doc.id}:`, error);
+    }
+  }
+  return count;
+}
+
+/** BR-8/BR-9: the employee's 10 minutes elapsed without acceptance. */
+async function processExpiredAssignments(): Promise<number> {
+  const expired = await adminDb
+    .collection('leads')
+    .where('status', '==', 'ASSIGNED')
+    .where('acceptDeadlineAt', '<', new Date())
+    .limit(BATCH_LIMIT)
+    .get();
+
+  let count = 0;
+  for (const doc of expired.docs) {
+    try {
+      if (await reassignExpiredLead(doc.id)) count++;
+    } catch (error) {
+      console.error(`[cron] Reassignment failed for lead ${doc.id}:`, error);
+    }
+  }
+  return count;
+}
+
+async function autoAssignLead(leadId: string): Promise<boolean> {
+  return adminDb.runTransaction(async (t: Transaction) => {
+    const leadRef = adminDb.collection('leads').doc(leadId);
     const leadSnap = await t.get(leadRef);
 
-    if (!leadSnap.exists || leadSnap.data()?.status !== "NEW") return;
+    // Idempotency guard: an admin may have assigned it since the query ran.
+    if (!leadSnap.exists || leadSnap.data()?.status !== 'NEW') return false;
 
-    const usersSnap = await t.get(adminDb.collection("users"));
-    const employees: Employee[] = [];
-    usersSnap.forEach((doc: QueryDocumentSnapshot) => {
-      const d = doc.data();
-      if (d.role === "employee") {
-        employees.push({ uid: doc.id, priority: d.priority || 99, status: d.status || "ACTIVE" });
-      }
+    const lead = leadSnap.data()!;
+    const { employees, cycleState, configRef } = await readDistributionState(t);
+
+    const { uid: assignee, newState } = getNextAssigneeAndState(employees, cycleState);
+
+    if (!assignee) {
+      // PRD §8 open question 4: rather than looping, park it for the admin.
+      t.update(leadRef, {
+        status: 'UNASSIGNED_NO_CAPACITY',
+        adminAssignDeadlineAt: FieldValue.delete(),
+      });
+      t.create(leadRef.collection('events').doc(), {
+        type: 'AUTO_ASSIGN_FAILED',
+        actorUid: 'system:cron',
+        at: FieldValue.serverTimestamp(),
+        meta: { reason: 'No active employee available' },
+      });
+      createNotification(t, {
+        type: 'UNASSIGNED_LEAD',
+        leadId,
+        message: `No active employee was available for "${lead.name ?? leadId}". Assign it manually.`,
+      });
+      return true;
+    }
+
+    const now = FieldValue.serverTimestamp();
+    t.update(leadRef, {
+      assignedUserId: assignee,
+      assignedAt: now,
+      lastActivityAt: now,
+      distributionMethod: 'AUTO',
+      status: 'ASSIGNED',
+      acceptDeadlineAt: new Date(Date.now() + ACCEPT_WINDOW_MS),
+      adminAssignDeadlineAt: FieldValue.delete(),
+      autoRotationCycleSnapshot: newState,
+      attemptedAssignees: FieldValue.arrayUnion(assignee),
     });
 
-    const configRef = adminDb.collection("config").doc("distribution");
-    const configSnap = await t.get(configRef);
-    const cycleState: CycleState = configSnap.exists ? (configSnap.data()?.cycleState || {}) : {};
+    t.create(leadRef.collection('events').doc(), {
+      type: 'AUTO_ASSIGNED',
+      actorUid: 'system:cron',
+      at: now,
+      meta: { assignedTo: assignee, rotationCounts: newState },
+    });
 
-    const { uid: nextAssignee, newState } = getNextAssigneeAndState(employees, cycleState);
+    t.set(configRef, { cycleState: newState, updatedAt: now }, { merge: true });
+    return true;
+  });
+}
+
+async function reassignExpiredLead(leadId: string): Promise<boolean> {
+  return adminDb.runTransaction(async (t: Transaction) => {
+    const leadRef = adminDb.collection('leads').doc(leadId);
+    const leadSnap = await t.get(leadRef);
+
+    if (!leadSnap.exists || leadSnap.data()?.status !== 'ASSIGNED') return false;
+
+    const lead = leadSnap.data()!;
+    const previousAssignee: string | null = lead.assignedUserId ?? null;
+
+    // Everyone who has already been offered this lead and let it lapse. Without
+    // this, two employees hand a lead back and forth indefinitely, raising a red
+    // flag on every pass.
+    const attempted: string[] = Array.isArray(lead.attemptedAssignees)
+      ? lead.attemptedAssignees
+      : previousAssignee
+        ? [previousAssignee]
+        : [];
+
+    const { employees, cycleState, configRef } = await readDistributionState(t);
+    const { uid: nextAssignee, newState } = getNextAssigneeAndState(employees, cycleState, attempted);
+
+    const now = FieldValue.serverTimestamp();
+
+    // BR-9: every non-acceptance raises a red flag, whether or not a new
+    // assignee was found.
+    t.create(leadRef.collection('events').doc(), {
+      type: 'EXPIRED',
+      actorUid: 'system:cron',
+      at: now,
+      meta: { previousAssignee, attemptedCount: attempted.length },
+    });
+
+    createNotification(t, {
+      type: 'RED_FLAG',
+      leadId,
+      message: `"${lead.name ?? leadId}" was not accepted within 10 minutes.`,
+      extra: { previousAssignee },
+    });
 
     if (!nextAssignee) {
-      t.update(leadRef, { status: "UNASSIGNED_NO_CAPACITY" });
-      return;
+      // Everyone has had a turn. Park it with the admin instead of cycling.
+      t.update(leadRef, {
+        status: 'UNASSIGNED_NO_CAPACITY',
+        assignedUserId: null,
+        acceptDeadlineAt: FieldValue.delete(),
+        adminAssignDeadlineAt: FieldValue.delete(),
+      });
+
+      createNotification(t, {
+        type: 'UNASSIGNED_LEAD',
+        leadId,
+        message: `"${lead.name ?? leadId}" has been declined by every available employee and needs manual assignment.`,
+      });
+      return true;
     }
 
     t.update(leadRef, {
       assignedUserId: nextAssignee,
-      assignedAt: FieldValue.serverTimestamp(),
-      distributionMethod: "AUTO",
-      status: "ASSIGNED",
-      acceptDeadlineAt: new Date(Date.now() + 10 * 60000)
+      assignedAt: now,
+      lastActivityAt: now,
+      distributionMethod: 'AUTO_REASSIGN',
+      status: 'ASSIGNED',
+      acceptDeadlineAt: new Date(Date.now() + ACCEPT_WINDOW_MS),
+      autoRotationCycleSnapshot: newState,
+      attemptedAssignees: FieldValue.arrayUnion(nextAssignee),
     });
-    t.set(configRef, { cycleState: newState }, { merge: true });
+
+    t.create(leadRef.collection('events').doc(), {
+      type: 'AUTO_REASSIGNED',
+      actorUid: 'system:cron',
+      at: now,
+      meta: { from: previousAssignee, to: nextAssignee },
+    });
+
+    t.set(configRef, { cycleState: newState, updatedAt: now }, { merge: true });
+    return true;
   });
 }
 
-async function reassignLead(leadId: string, oldAssignee: string) {
-  await adminDb.runTransaction(async (t: Transaction) => {
-    const leadRef = adminDb.collection("leads").doc(leadId);
-    const leadSnap = await t.get(leadRef);
+/**
+ * FR-18 / BR-21: a lead sitting with an employee and no logged activity.
+ *
+ * `lastActivityAt` is stamped at assignment and refreshed by every follow-up,
+ * so this is one indexed query rather than a subcollection read per lead.
+ * The notification id is derived from the lead, so a lead that stays stale
+ * across many sweeps updates a single alert instead of flooding the panel.
+ */
+async function processStaleLeads(): Promise<number> {
+  const hours = await readMonitoringWindowHours();
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-    if (!leadSnap.exists || leadSnap.data()?.status !== "ASSIGNED" || leadSnap.data()?.assignedUserId !== oldAssignee) return;
+  const stale = await adminDb
+    .collection('leads')
+    .where('status', 'in', ACTIVE_STATUSES)
+    .where('lastActivityAt', '<', cutoff)
+    .limit(BATCH_LIMIT)
+    .get();
 
-    const eventRef = leadRef.collection("events").doc();
-    t.set(eventRef, {
-      type: "EXPIRED", actorUid: "system", at: FieldValue.serverTimestamp(), meta: { previousAssignee: oldAssignee }
+  if (stale.empty) return 0;
+
+  const batch = adminDb.batch();
+  let count = 0;
+
+  for (const doc of stale.docs) {
+    const lead = doc.data();
+    const ref = adminDb.collection('notifications').doc(`nofollowup_${doc.id}`);
+
+    batch.set(
+      ref,
+      {
+        type: 'NO_FOLLOWUP',
+        leadId: doc.id,
+        targetRole: 'admin',
+        payload: {
+          message: `No follow-up logged on "${lead.name ?? doc.id}" for over ${hours} hours.`,
+          assignedUserId: lead.assignedUserId ?? null,
+          campaignName: lead.campaignName ?? null,
+          leadStatus: lead.status,
+          assignedAt: lead.assignedAt ?? null,
+        },
+        createdAt: FieldValue.serverTimestamp(),
+        readAt: null,
+      },
+      { merge: true }
+    );
+    count++;
+  }
+
+  await batch.commit();
+  return count;
+}
+
+async function readDistributionState(t: Transaction) {
+  const usersSnap = await t.get(adminDb.collection('users').where('role', '==', 'employee'));
+
+  const employees: Employee[] = [];
+  usersSnap.forEach((doc: QueryDocumentSnapshot) => {
+    const data = doc.data();
+    employees.push({
+      uid: doc.id,
+      priority: typeof data.priority === 'number' ? data.priority : 99,
+      status: data.status === 'DISABLED' ? 'DISABLED' : 'ACTIVE',
     });
+  });
 
-    const notifRef = adminDb.collection("notifications").doc();
-    t.set(notifRef, {
-      type: "RED_FLAG", leadId, targetRole: "admin", payload: { message: "Lead expired without acceptance." },
-      createdAt: FieldValue.serverTimestamp(), readAt: null
-    });
+  const configRef = adminDb.collection('config').doc('distribution');
+  const configSnap = await t.get(configRef);
+  const cycleState: CycleState = configSnap.exists ? (configSnap.data()?.cycleState ?? {}) : {};
 
-    const usersSnap = await t.get(adminDb.collection("users"));
-    const employees: Employee[] = [];
-    usersSnap.forEach((doc: QueryDocumentSnapshot) => {
-      const d = doc.data();
-      if (d.role === "employee" && doc.id !== oldAssignee) {
-        employees.push({ uid: doc.id, priority: d.priority || 99, status: d.status || "ACTIVE" });
-      }
-    });
+  return { employees, cycleState, configRef };
+}
 
-    const configRef = adminDb.collection("config").doc("distribution");
-    const configSnap = await t.get(configRef);
-    const cycleState: CycleState = configSnap.exists ? (configSnap.data()?.cycleState || {}) : {};
+/** FR-18 says the monitoring period is configurable; this is where it comes from. */
+async function readMonitoringWindowHours(): Promise<number> {
+  try {
+    const snap = await adminDb.collection('config').doc('monitoring').get();
+    const value = Number(snap.data()?.noFollowUpHours);
+    if (Number.isFinite(value) && value > 0) return value;
+  } catch {
+    // Fall through to the default.
+  }
+  return DEFAULT_NO_FOLLOWUP_HOURS;
+}
 
-    const { uid: nextAssignee, newState } = getNextAssigneeAndState(employees, cycleState);
-
-    if (!nextAssignee) {
-      t.update(leadRef, { status: "NEW", assignedUserId: null, assignedAt: null, adminAssignDeadlineAt: new Date(Date.now() + 5 * 60000) });
-      return;
-    }
-
-    t.update(leadRef, {
-      assignedUserId: nextAssignee, assignedAt: FieldValue.serverTimestamp(), distributionMethod: "AUTO_REASSIGN",
-      autoRotationCycleSnapshot: newState, acceptDeadlineAt: new Date(Date.now() + 10 * 60000)
-    });
-    t.set(configRef, { cycleState: newState }, { merge: true });
+function createNotification(
+  t: Transaction,
+  input: { type: string; leadId: string; message: string; extra?: Record<string, unknown> }
+) {
+  t.create(adminDb.collection('notifications').doc(), {
+    type: input.type,
+    leadId: input.leadId,
+    targetRole: 'admin',
+    payload: { message: input.message, ...(input.extra ?? {}) },
+    createdAt: FieldValue.serverTimestamp(),
+    readAt: null,
   });
 }

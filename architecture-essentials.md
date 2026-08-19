@@ -3,9 +3,13 @@
 *Condensed from `architecture.md`. Keep this loaded as always-on context — it's short on purpose.*
 
 ## Stack
-Next.js on **Vercel** (frontend) · **Firebase**: Cloud Functions (backend logic), Firestore (DB),
-Firebase Auth, Firebase Storage, **Cloud Tasks** (timers), Cloud Scheduler (recurring scans).
-Repo: Next.js app at root + a `/functions` package for Cloud Functions. See architecture.md §8.
+Next.js on **Vercel** — UI, **Server Actions** (all privileged writes), webhook and cron route
+handlers · **Firebase**: Firestore (DB, realtime via `onSnapshot`), Firebase Auth (`role` custom
+claim), Firebase Storage. SLA timers are deadline timestamps on the lead document, swept by
+`/api/cron/process-deadlines`.
+
+> `architecture.md` specifies Cloud Functions + Cloud Tasks + Cloud Scheduler. That is *not*
+> what was built — see `docs/implementation-notes.md`. There is no `/functions` package.
 
 ## Entities (Firestore collections)
 `users/{uid}` (role, priority) · `campaigns/{id}` · `leads/{id}` with subcollections
@@ -28,8 +32,10 @@ Repo: Next.js app at root + a `/functions` package for Cloud Functions. See arch
    preserves their historical records (soft status flag, not document deletion).
 7. `Profit = Amount Received − Payable Amount`, computed server-side in the `closeDeal` Function —
    never trust a client-submitted profit value. `Net Profit = Σ Profit − Σ Expenses`.
-8. Timers (5-min / 10-min) must survive redeploys/cold-starts → **Cloud Tasks**, never
-   `setTimeout` or any in-memory delay inside a Function.
+8. Timers (5-min / 10-min) must survive redeploys/cold-starts. Implemented as deadline
+   timestamps on the lead document, swept by a scheduled route — never `setTimeout` or any
+   in-memory delay. Deadlines fire on the next sweep, so the real window is the SLA plus up
+   to one cron interval.
 9. WhatsApp send-side integration is a stubbed, switched-off seam until real credentials arrive —
    don't build a parallel path when they do, just flip `config/integrations.whatsapp.enabled`.
 

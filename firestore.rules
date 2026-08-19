@@ -1,43 +1,118 @@
 rules_version = '2';
+
+// Security Rules are the outer boundary (architecture.md §7, invariant 5).
+//
+// Two principles run through this file:
+//
+//  1. The client SDK never writes. Every write in this product goes through a
+//     Server Action using the Admin SDK, which re-checks role and ownership
+//     itself. Rules exist to stop anyone bypassing that path with the public
+//     web API key, which ships in the browser bundle and is not a secret.
+//
+//  2. Reads are scoped by role. BR-10 says employees only ever see their own
+//     leads and data — enforced here at the query layer, not by hiding things
+//     in the UI.
+//
+// Role comes from the `role` custom claim, set only by the Admin SDK. If an
+// admin appears to have no access, their claim has not been issued yet — run
+// `npm run set-admin-role -- <email>` and sign in again.
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Core Collections - accessible to authenticated CRM users
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function isAdmin() {
+      return signedIn() && role() == 'admin';
+    }
+
+    function isEmployee() {
+      return signedIn() && role() == 'employee';
+    }
+
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Whether the caller is the employee currently working a given lead.
+    // Rules cache identical get() calls within one evaluation, so reading a
+    // list of follow-ups costs one lookup, not one per document.
+    function ownsLead(leadId) {
+      return isEmployee()
+        && get(/databases/$(database)/documents/leads/$(leadId)).data.assignedUserId == request.auth.uid;
+    }
+
+    // Employee profiles. Admin manages the roster; an employee may read only
+    // their own record. Priority and status are never client-writable — that
+    // would let an employee promote themselves in the rotation.
     match /users/{userId} {
-      allow read, write: if true;
+      allow read: if isAdmin() || isSelf(userId);
+      allow write: if false;
     }
-    
+
     match /campaigns/{campaignId} {
-      allow read, write: if true;
+      allow read: if signedIn();
+      allow write: if false;
     }
-    
+
     match /leads/{leadId} {
-      allow read, write: if true;
-      
-      // Subcollections: Follow-Ups and Audit Events
+      allow read: if isAdmin()
+        || (isEmployee() && resource.data.assignedUserId == request.auth.uid);
+      allow write: if false;
+
+      // BR-13 / BR-14: a submitted follow-up is permanent. Update and delete
+      // are denied for every role, admin included. This is defence in depth —
+      // there is also no update or delete code path anywhere in the app.
       match /followUps/{followUpId} {
-        allow read, write: if true;
+        allow read: if isAdmin() || ownsLead(leadId);
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
       }
-      
+
+      // Audit trail (FR-29). Append-only, and only the server appends.
       match /events/{eventId} {
-        allow read, write: if true;
+        allow read: if isAdmin() || ownsLead(leadId);
+        allow write: if false;
       }
     }
-    
+
+    // Closed deals carry customer contact details and financials. An employee
+    // sees only the deals credited to them (PRD §2: own revenue/profit only).
     match /closedDeals/{dealId} {
-      allow read, write: if true;
+      allow read: if isAdmin()
+        || (isEmployee() && resource.data.userId == request.auth.uid);
+      allow write: if false;
     }
-    
+
+    // Office expenses are admin-only in both directions (BR-20).
     match /expenses/{expenseId} {
-      allow read, write: if true;
+      allow read: if isAdmin();
+      allow write: if false;
     }
-    
+
+    // Admin alerts: red flags, missed acceptances, stale leads (FR-19).
     match /notifications/{notificationId} {
-      allow read, write: if true;
+      allow read: if isAdmin();
+      allow write: if false;
     }
-    
+
+    // Rotation state and integration flags. Never exposed to employees —
+    // config/distribution reveals the whole team's lead counts.
     match /config/{configId} {
-      allow read, write: if true;
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Anything not matched above is denied.
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

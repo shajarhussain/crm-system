@@ -5,50 +5,77 @@ export interface Employee {
 }
 
 export interface CycleState {
-  [uid: string]: number; // count of leads assigned in current cycle
+  [uid: string]: number; // leads assigned to this employee in the current cycle
+}
+
+export const LEADS_PER_TURN = 8;
+
+export interface AssigneeResolution {
+  uid: string | null;
+  newState: CycleState;
+  /** True when the rotation wrapped around and every counter was cleared. */
+  cycleReset: boolean;
 }
 
 /**
- * Pure function to resolve the next assignee and return the updated cycle state.
- * Implements the 8-lead rotation and priority-based assignment rules.
+ * Resolves the next assignee under the priority + 8-lead rotation rule
+ * (BR-6, architecture.md §4.2) and returns the updated cycle state.
+ *
+ * The rule as implemented: the highest-priority active employee receives eight
+ * leads, then the next priority receives eight, and so on; once the lowest
+ * priority completes their eight the cycle resets and it starts again from
+ * priority 1. Disabled employees are skipped without breaking the sequence.
+ *
+ * NOTE (PRD §8 open question 1): only auto-assignments advance these counters —
+ * a lead the admin hands out manually inside the 5-minute window does not
+ * consume anyone's eight. That is the behaviour the system already had; it is
+ * flagged for client confirmation rather than changed here.
+ *
+ * `excludeUids` covers reassignment: an employee who has already been offered
+ * this lead and let it expire is skipped for subsequent passes, but keeps their
+ * cycle counter so their place in the rotation is not lost.
+ *
+ * Pure and total — no I/O, no clock, no randomness. See distribution.test.ts.
  */
 export function getNextAssigneeAndState(
-  employees: Employee[], 
-  cycleState: CycleState
-): { uid: string | null; newState: CycleState } {
-  // 1. Filter and sort employees by priority (1 = highest)
+  employees: Employee[],
+  cycleState: CycleState,
+  excludeUids: string[] = []
+): AssigneeResolution {
+  const excluded = new Set(excludeUids);
+
   const activeEmployees = employees
-    .filter(e => e.status === 'ACTIVE')
-    .sort((a, b) => a.priority - b.priority);
+    .filter((e) => e.status === 'ACTIVE')
+    .sort((a, b) => a.priority - b.priority || a.uid.localeCompare(b.uid));
 
-  if (activeEmployees.length === 0) {
-    return { uid: null, newState: cycleState };
+  const eligible = activeEmployees.filter((e) => !excluded.has(e.uid));
+
+  if (eligible.length === 0) {
+    return { uid: null, newState: cycleState, cycleReset: false };
   }
 
-  let selectedUid: string | null = null;
-  let needsReset = true;
+  // Whoever has not yet taken their eight, in priority order.
+  const withCapacity = eligible.find((e) => (cycleState[e.uid] ?? 0) < LEADS_PER_TURN);
 
-  // 2. Find the first employee who hasn't reached 8 leads
-  for (const emp of activeEmployees) {
-    const count = cycleState[emp.uid] || 0;
-    if (count < 8) {
-      selectedUid = emp.uid;
-      needsReset = false;
-      break;
-    }
+  if (withCapacity) {
+    return {
+      uid: withCapacity.uid,
+      newState: { ...cycleState, [withCapacity.uid]: (cycleState[withCapacity.uid] ?? 0) + 1 },
+      cycleReset: false,
+    };
   }
 
-  // 3. If everyone has reached 8 leads, start a new cycle
-  if (needsReset) {
-    selectedUid = activeEmployees[0].uid;
-    const newState = { [selectedUid]: 1 };
-    return { uid: selectedUid, newState };
-  } 
-  
-  // 4. Otherwise, increment their count in the current cycle
-  const newState = { 
-    ...cycleState, 
-    [selectedUid as string]: (cycleState[selectedUid as string] || 0) + 1 
-  };
-  return { uid: selectedUid as string, newState };
+  // Everyone eligible has taken their eight — wrap around and start a new cycle.
+  //
+  // Counters are cleared for the whole active roster, not just the eligible
+  // subset. Clearing only the eligible ones would leave an excluded employee
+  // sitting at 8 into the next cycle and silently cost them their turn.
+  const selected = eligible[0];
+  const newState: CycleState = {};
+  for (const employee of activeEmployees) {
+    newState[employee.uid] = 0;
+  }
+  newState[selected.uid] = 1;
+
+  return { uid: selected.uid, newState, cycleReset: true };
 }

@@ -1,138 +1,294 @@
-import { useState, useEffect } from 'react';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { useState, useEffect, useMemo } from 'react';
+import { collection, doc, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '@/lib/firebase/client';
+import { describeFirestoreError, type FirestoreTimestamp } from './useLeads';
+import { withinRange, type DateRange } from '@/lib/dates';
+import { IS_DEMO, useDemoState } from '@/lib/demo/store';
 
 export interface ExpenseRecord {
   id: string;
   title: string;
   category: string;
   amount: number;
-  description?: string;
+  description?: string | null;
   addedByUid: string;
-  date: any;
+  addedByEmail?: string | null;
+  date?: FirestoreTimestamp;
+}
+
+export interface DealCustomer {
+  name: string;
+  phone: string;
+  email?: string | null;
+  cnic?: string | null;
+  address?: string | null;
+  city?: string | null;
 }
 
 export interface DealRecord {
   id: string;
   leadId: string;
+  /** The employee credited with the sale. */
   userId: string;
+  /** Whoever filled in the entry form — may be an admin acting for them. */
+  enteredByUid?: string;
+  customer?: DealCustomer;
+  serviceDescription?: string;
+  paymentMethod?: string;
+  notes?: string | null;
   amountReceived: number;
   payableAmount: number;
   profit: number;
-  enteredAt: any;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  dealDate?: FirestoreTimestamp;
+  enteredAt?: FirestoreTimestamp;
 }
 
 export interface AppNotification {
   id: string;
   type: string;
   leadId: string;
-  payload: any;
-  createdAt: any;
+  payload?: { message?: string; [key: string]: unknown };
+  createdAt?: FirestoreTimestamp;
+  readAt?: FirestoreTimestamp | null;
 }
 
-const DEMO_EXPENSES: ExpenseRecord[] = [
-  { id: "exp-1", title: "Meta Lead Ads - Summer Campaign", category: "Marketing", amount: 1250, description: "Lead acquisition budget across Meta platforms", addedByUid: "admin", date: { toDate: () => new Date() } },
-  { id: "exp-2", title: "Fiber Internet Office", category: "Internet", amount: 150, description: "Monthly high-speed connection", addedByUid: "admin", date: { toDate: () => new Date() } },
-  { id: "exp-3", title: "Enterprise Software Suite", category: "Software", amount: 300, description: "Tools and CRM licenses", addedByUid: "admin", date: { toDate: () => new Date() } },
-];
-
-const DEMO_DEALS: DealRecord[] = [
-  { id: "deal-1", leadId: "lead-meta-104", userId: "demo-emp-1", amountReceived: 8500, payableAmount: 5000, profit: 3500, enteredAt: { toDate: () => new Date() } }
-];
-
-const DEMO_NOTIFICATIONS: AppNotification[] = [
-  { id: "notif-1", type: "RED_FLAG", leadId: "lead-meta-102", payload: { message: "Lead SLA timer approaching 10-minute threshold." }, createdAt: { toDate: () => new Date() } }
-];
-
-export function useFinancials() {
-  const [netProfit, setNetProfit] = useState<number>(1800);
-  const [totalExpenses, setTotalExpenses] = useState<number>(1700);
-  const [totalRevenue, setTotalRevenue] = useState<number>(3500);
-  const [expenses, setExpenses] = useState<ExpenseRecord[]>(DEMO_EXPENSES);
-  const [deals, setDeals] = useState<DealRecord[]>(DEMO_DEALS);
-
-  useEffect(() => {
-    let dealsSum = 3500;
-    let expensesSum = 1700;
-
-    try {
-      const unsubDeals = onSnapshot(collection(db, 'closedDeals'), (snap) => {
-        if (!snap.empty) {
-          const dealList = snap.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as DealRecord[];
-          
-          dealList.sort((a, b) => {
-            const aTime = a.enteredAt?.toMillis ? a.enteredAt.toMillis() : 0;
-            const bTime = b.enteredAt?.toMillis ? b.enteredAt.toMillis() : 0;
-            return bTime - aTime;
-          });
-
-          dealsSum = dealList.reduce((sum, doc) => sum + (doc.profit || 0), 0);
-          setDeals(dealList);
-          setTotalRevenue(dealsSum);
-          setNetProfit(dealsSum - expensesSum);
-        }
-      }, () => {});
-
-      const unsubExpenses = onSnapshot(collection(db, 'expenses'), (snap) => {
-        if (!snap.empty) {
-          const expList = snap.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as ExpenseRecord[];
-
-          expList.sort((a, b) => {
-            const aTime = a.date?.toMillis ? a.date.toMillis() : 0;
-            const bTime = b.date?.toMillis ? b.date.toMillis() : 0;
-            return bTime - aTime;
-          });
-
-          expensesSum = expList.reduce((sum, doc) => sum + (doc.amount || 0), 0);
-          setExpenses(expList);
-          setTotalExpenses(expensesSum);
-          setNetProfit(dealsSum - expensesSum);
-        }
-      }, () => {});
-
-      return () => {
-        unsubDeals();
-        unsubExpenses();
-      };
-    } catch (e) {
-      // fallback to demo defaults
-    }
-  }, []);
-
-  return { netProfit, totalExpenses, totalRevenue, expenses, deals };
+export interface FinancialTotals {
+  /** Σ amount received — the actual money in (FR-28). */
+  totalRevenue: number;
+  /** Σ payable — what has to go back out. */
+  totalPayable: number;
+  /** Revenue − payable (BR-19). */
+  grossProfit: number;
+  totalExpenses: number;
+  /** Gross profit − expenses (FR-28). */
+  netProfit: number;
+  dealCount: number;
+  expenseCount: number;
 }
 
-export function useNotifications() {
-  const [notifications, setNotifications] = useState<AppNotification[]>(DEMO_NOTIFICATIONS);
+/**
+ * Financial rollups for the admin dashboard (FR-28).
+ *
+ * Totals are derived from the loaded documents rather than accumulated inside
+ * the snapshot callbacks. The previous version shared mutable running sums
+ * between two listeners, so whichever fired second computed net profit against
+ * whatever the other had left behind — a race that produced a different figure
+ * depending on which query resolved first.
+ */
+export function useFinancials(range: DateRange, enabled = true) {
+  const [deals, setDeals] = useState<DealRecord[] | null>(null);
+  const [expenses, setExpenses] = useState<ExpenseRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const demoState = useDemoState();
 
   useEffect(() => {
-    try {
-      const q = query(
-        collection(db, 'notifications'), 
-        where('readAt', '==', null)
-      );
+    if (IS_DEMO || !enabled) return;
 
-      const unsub = onSnapshot(q, (snap) => {
-        if (!snap.empty) {
-          const data = snap.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as AppNotification[];
-          setNotifications(data);
-        }
-      }, () => {});
+    const unsubDeals = onSnapshot(
+      query(collection(db, 'closedDeals'), orderBy('enteredAt', 'desc'), limit(1000)),
+      (snap) => {
+        setDeals(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as DealRecord[]);
+      },
+      (err) => {
+        console.error('[useFinancials:deals]', err);
+        setDeals([]);
+        setError(describeFirestoreError(err));
+      }
+    );
 
-      return () => unsub();
-    } catch (e) {
-      // fallback
-    }
-  }, []);
+    const unsubExpenses = onSnapshot(
+      query(collection(db, 'expenses'), orderBy('date', 'desc'), limit(1000)),
+      (snap) => {
+        setExpenses(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as ExpenseRecord[]);
+      },
+      (err) => {
+        console.error('[useFinancials:expenses]', err);
+        setExpenses([]);
+        setError(describeFirestoreError(err));
+      }
+    );
 
-  return { notifications };
+    return () => {
+      unsubDeals();
+      unsubExpenses();
+    };
+  }, [enabled]);
+
+  const allDeals = useMemo(
+    () => (!enabled ? [] : IS_DEMO ? demoState.deals : (deals ?? [])),
+    [enabled, deals, demoState.deals]
+  );
+  const allExpenses = useMemo(
+    () => (!enabled ? [] : IS_DEMO ? demoState.expenses : (expenses ?? [])),
+    [enabled, expenses, demoState.expenses]
+  );
+
+  // Filtering happens here rather than in the query so that changing the range
+  // is instant and does not re-subscribe.
+  const dealsInRange = useMemo(
+    () => allDeals.filter((deal) => withinRange(deal.dealDate ?? deal.enteredAt, range)),
+    [allDeals, range]
+  );
+
+  const expensesInRange = useMemo(
+    () => allExpenses.filter((expense) => withinRange(expense.date, range)),
+    [allExpenses, range]
+  );
+
+  const totals = useMemo<FinancialTotals>(() => {
+    const totalRevenue = sum(dealsInRange, (d) => d.amountReceived);
+    const totalPayable = sum(dealsInRange, (d) => d.payableAmount);
+    const totalExpenses = sum(expensesInRange, (e) => e.amount);
+    const grossProfit = totalRevenue - totalPayable;
+
+    return {
+      totalRevenue,
+      totalPayable,
+      grossProfit,
+      totalExpenses,
+      netProfit: grossProfit - totalExpenses,
+      dealCount: dealsInRange.length,
+      expenseCount: expensesInRange.length,
+    };
+  }, [dealsInRange, expensesInRange]);
+
+  return {
+    deals: dealsInRange,
+    expenses: expensesInRange,
+    allDeals,
+    totals,
+    loading: IS_DEMO ? false : enabled && (deals === null || expenses === null),
+    error: IS_DEMO ? null : enabled ? error : null,
+  };
+}
+
+/**
+ * The deal entry for one lead, if it has been closed.
+ * The deal document id is the lead id, so this is a direct lookup.
+ */
+export function useDealForLead(leadId: string | null) {
+  const [state, setState] = useState<{ key: string; deal: DealRecord | null } | null>(null);
+  const demoState = useDemoState();
+  const key = leadId ?? 'idle';
+
+  useEffect(() => {
+    if (IS_DEMO || !leadId) return;
+
+    const unsubscribe = onSnapshot(
+      doc(db, 'closedDeals', leadId),
+      (snap) => {
+        setState({ key: leadId, deal: snap.exists() ? ({ id: snap.id, ...snap.data() } as DealRecord) : null });
+      },
+      (err) => {
+        console.error('[useDealForLead]', err);
+        setState({ key: leadId, deal: null });
+      }
+    );
+
+    return () => unsubscribe();
+  }, [leadId]);
+
+  if (IS_DEMO) {
+    return {
+      deal: leadId ? (demoState.deals.find((d) => d.leadId === leadId) ?? null) : null,
+      loading: false,
+    };
+  }
+
+  const current = state?.key === key ? state : null;
+  return { deal: current?.deal ?? null, loading: Boolean(leadId) && current === null };
+}
+
+/** An employee's own closed deals — Security Rules scope this to them. */
+export function useMyDeals(uid: string | undefined, range: DateRange) {
+  const [state, setState] = useState<{ key: string; deals: DealRecord[] } | null>(null);
+  const demoState = useDemoState();
+  const key = uid ?? 'idle';
+
+  useEffect(() => {
+    if (IS_DEMO || !uid) return;
+
+    const unsubscribe = onSnapshot(
+      query(
+        collection(db, 'closedDeals'),
+        where('userId', '==', uid),
+        orderBy('enteredAt', 'desc'),
+        limit(500)
+      ),
+      (snap) => {
+        setState({ key: uid, deals: snap.docs.map((d) => ({ id: d.id, ...d.data() })) as DealRecord[] });
+      },
+      (err) => {
+        console.error('[useMyDeals]', err);
+        setState({ key: uid, deals: [] });
+      }
+    );
+
+    return () => unsubscribe();
+  }, [uid]);
+
+  const current = state?.key === key ? state : null;
+  const allDeals = useMemo(
+    () => (IS_DEMO ? demoState.deals.filter((d) => d.userId === uid) : (current?.deals ?? [])),
+    [current, demoState.deals, uid]
+  );
+
+  const dealsInRange = useMemo(
+    () => allDeals.filter((deal) => withinRange(deal.dealDate ?? deal.enteredAt, range)),
+    [allDeals, range]
+  );
+
+  const totals = useMemo(
+    () => ({
+      revenue: sum(dealsInRange, (d) => d.amountReceived),
+      profit: sum(dealsInRange, (d) => d.profit),
+      count: dealsInRange.length,
+    }),
+    [dealsInRange]
+  );
+
+  return { deals: dealsInRange, totals, loading: IS_DEMO ? false : Boolean(uid) && current === null };
+}
+
+/** Unread admin alerts (FR-19). */
+export function useNotifications(enabled = true) {
+  const [notifications, setNotifications] = useState<AppNotification[] | null>(null);
+  const demoState = useDemoState();
+
+  useEffect(() => {
+    if (IS_DEMO || !enabled) return;
+
+    const unsubscribe = onSnapshot(
+      query(
+        collection(db, 'notifications'),
+        where('readAt', '==', null),
+        orderBy('createdAt', 'desc'),
+        limit(100)
+      ),
+      (snap) => {
+        setNotifications(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as AppNotification[]);
+      },
+      (err) => {
+        console.error('[useNotifications]', err);
+        setNotifications([]);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [enabled]);
+
+  if (IS_DEMO) {
+    return { notifications: enabled ? demoState.notifications : [], loading: false };
+  }
+
+  return {
+    notifications: enabled ? (notifications ?? []) : [],
+    loading: enabled && notifications === null,
+  };
+}
+
+function sum<T>(items: T[], pick: (item: T) => number | undefined): number {
+  return items.reduce((total, item) => total + (Number(pick(item)) || 0), 0);
 }

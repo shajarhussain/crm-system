@@ -1,36 +1,60 @@
 import { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '@/lib/firebase/client';
+import { IS_DEMO, useDemoState } from '@/lib/demo/store';
+import type { LeadStatus } from '@/lib/leadStatus';
 
-export type LeadStatus = 
-  | 'NEW'
-  | 'ASSIGNED'
-  | 'ACCEPTED'
-  | 'CONTACTED'
-  | 'FOLLOW_UP'
-  | 'INTERESTED'
-  | 'NEGOTIATION'
-  | 'CLOSED_WON'
-  | 'CLOSED_LOST'
-  | 'NOT_INTERESTED'
-  | 'NO_RESPONSE'
-  | 'UNASSIGNED_NO_CAPACITY';
+export type { LeadStatus };
+
+/**
+ * Live lead data.
+ *
+ * These hooks return real Firestore state and nothing else. An earlier version
+ * fell back to hardcoded sample leads whenever a query returned empty or
+ * errored, which meant a permissions failure looked like a working dashboard
+ * full of fictional customers and fictional revenue. Errors now surface as
+ * errors.
+ *
+ * Each hook stamps its results with the subscription key they came from, and
+ * `loading` is derived by comparing that stamp to the current key. That keeps
+ * every setState inside an async snapshot callback — resetting state from the
+ * effect body instead would trigger a cascading render on every change of role
+ * or selected lead.
+ */
 
 export interface Lead {
   id: string;
   name: string;
-  phone?: string;
-  email?: string;
+  phone?: string | null;
+  email?: string | null;
+  city?: string | null;
   status: LeadStatus;
   source: string;
-  campaignId: string;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  adName?: string | null;
   assignedUserId: string | null;
-  createdAt: any;
-  assignedAt?: any;
-  acceptedAt?: any;
-  adminAssignDeadlineAt?: any;
-  acceptDeadlineAt?: any;
+  attemptedAssignees?: string[];
+  createdAt?: FirestoreTimestamp;
+  assignedAt?: FirestoreTimestamp;
+  acceptedAt?: FirestoreTimestamp;
+  closedAt?: FirestoreTimestamp;
+  lastActivityAt?: FirestoreTimestamp;
+  lastFollowUpAt?: FirestoreTimestamp;
+  followUpCount?: number;
+  callCount?: number;
+  adminAssignDeadlineAt?: FirestoreTimestamp;
+  acceptDeadlineAt?: FirestoreTimestamp;
   distributionMethod?: 'MANUAL' | 'AUTO' | 'AUTO_REASSIGN';
+  intakeWarning?: string | null;
+  customFields?: Record<string, string>;
+}
+
+/** Firestore Timestamps as they arrive on the client. */
+export interface FirestoreTimestamp {
+  toDate: () => Date;
+  toMillis: () => number;
+  seconds?: number;
 }
 
 export interface FollowUpRecord {
@@ -38,221 +62,169 @@ export interface FollowUpRecord {
   message: string;
   callMade: boolean;
   callCount?: number;
-  whatsappNote?: string;
-  occurredAt: any;
-  createdAt: any;
+  whatsappNote?: string | null;
+  occurredAt?: FirestoreTimestamp;
+  createdAt?: FirestoreTimestamp;
   authorUid: string;
+  authorEmail?: string | null;
 }
 
 export interface AuditEventRecord {
   id: string;
   type: string;
   actorUid: string;
-  at: any;
-  meta?: any;
+  at?: FirestoreTimestamp;
+  meta?: Record<string, unknown>;
 }
 
-const DEMO_LEADS: Lead[] = [
-  {
-    id: "lead-meta-101",
-    name: "Johnathan Doe (Luxury Villa Lead)",
-    phone: "+15552345678",
-    email: "johndoe@gmail.com",
-    status: "NEW",
-    source: "Meta Lead Ads",
-    campaignId: "CAMP_SUMMER_LUXURY",
-    assignedUserId: null,
-    createdAt: { toDate: () => new Date() },
-    adminAssignDeadlineAt: { toMillis: () => Date.now() + 4 * 60000 + 30000 }
-  },
-  {
-    id: "lead-meta-102",
-    name: "Sarah Miller (Commercial Property Inquiry)",
-    phone: "+15559876543",
-    email: "sarah.m@business.com",
-    status: "ASSIGNED",
-    source: "Meta Lead Ads",
-    campaignId: "CAMP_COMMERCIAL_Q3",
-    assignedUserId: "demo-emp-1",
-    createdAt: { toDate: () => new Date(Date.now() - 3600000) },
-    acceptDeadlineAt: { toMillis: () => Date.now() + 8 * 60000 + 15000 }
-  },
-  {
-    id: "lead-meta-103",
-    name: "Alexander Wright (Consulting Client)",
-    phone: "+15551122334",
-    email: "a.wright@firm.com",
-    status: "ACCEPTED",
-    source: "Meta Lead Ads",
-    campaignId: "CAMP_CONSULTING_PRO",
-    assignedUserId: "demo-emp-1",
-    createdAt: { toDate: () => new Date(Date.now() - 86400000) },
-    distributionMethod: "AUTO"
-  },
-  {
-    id: "lead-meta-104",
-    name: "David Chen (Closed Deal)",
-    phone: "+15554433221",
-    email: "d.chen@investments.com",
-    status: "CLOSED_WON",
-    source: "Meta Lead Ads",
-    campaignId: "CAMP_SUMMER_LUXURY",
-    assignedUserId: "demo-emp-1",
-    createdAt: { toDate: () => new Date(Date.now() - 172800000) }
-  }
-];
+/** Guards against unbounded reads on the admin dashboard. */
+const LEAD_PAGE_SIZE = 500;
 
-const DEMO_FOLLOWUPS: FollowUpRecord[] = [
-  {
-    id: "fu-1",
-    message: "Called client regarding commercial property portfolio. Client expressed high interest in Q3 options.",
-    callMade: true,
-    callCount: 2,
-    whatsappNote: "Sent catalog link via WhatsApp chat",
-    occurredAt: { toDate: () => new Date() },
-    createdAt: { toDate: () => new Date() },
-    authorUid: "sarah.sales"
-  }
-];
+interface LeadState {
+  key: string;
+  leads: Lead[];
+  error: string | null;
+}
 
-const DEMO_EVENTS: AuditEventRecord[] = [
-  {
-    id: "ev-1",
-    type: "LEAD_INGESTED",
-    actorUid: "system_meta_webhook",
-    at: { toDate: () => new Date(Date.now() - 3600000) },
-    meta: { source: "Meta Lead Ads", campaign: "CAMP_COMMERCIAL_Q3" }
-  },
-  {
-    id: "ev-2",
-    type: "MANUALLY_ASSIGNED",
-    actorUid: "admin",
-    at: { toDate: () => new Date(Date.now() - 3300000) },
-    meta: { assignedTo: "demo-emp-1" }
-  }
-];
+export function useLeads(role: 'admin' | 'employee' | null, uid?: string) {
+  const [state, setState] = useState<LeadState | null>(null);
+  const demoState = useDemoState();
 
-export function useLeads(role: 'admin' | 'employee', uid?: string) {
-  const [leads, setLeads] = useState<Lead[]>(DEMO_LEADS);
-  const [loading, setLoading] = useState(true);
+  const key = !role || (role === 'employee' && !uid) ? 'idle' : role === 'admin' ? 'admin' : `employee:${uid}`;
 
   useEffect(() => {
-    if (!role || (role === 'employee' && !uid)) {
-      setLoading(false);
-      return;
-    }
+    if (IS_DEMO || key === 'idle') return;
 
-    try {
-      const leadsRef = collection(db, 'leads');
-      const q = role === 'admin' 
-        ? query(leadsRef) 
-        : query(leadsRef, where('assignedUserId', '==', uid));
+    const leadsRef = collection(db, 'leads');
+    const q =
+      key === 'admin'
+        ? query(leadsRef, orderBy('createdAt', 'desc'), limit(LEAD_PAGE_SIZE))
+        : query(
+            leadsRef,
+            where('assignedUserId', '==', uid),
+            orderBy('createdAt', 'desc'),
+            limit(LEAD_PAGE_SIZE)
+          );
 
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        if (!snapshot.empty) {
-          const data = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as Lead[];
-          
-          data.sort((a, b) => {
-            const aTime = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
-            const bTime = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
-            return bTime - aTime;
-          });
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        setState({
+          key,
+          leads: snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Lead[],
+          error: null,
+        });
+      },
+      (err) => {
+        console.error('[useLeads]', err);
+        setState({ key, leads: [], error: describeFirestoreError(err) });
+      }
+    );
 
-          setLeads(data);
-        } else {
-          // If Firestore is empty, show demo leads filtered by role
-          if (role === 'employee') {
-            setLeads(DEMO_LEADS.filter(l => l.assignedUserId === "demo-emp-1" || l.assignedUserId === uid));
-          } else {
-            setLeads(DEMO_LEADS);
-          }
-        }
-        setLoading(false);
-      }, (error) => {
-        console.warn("Firestore leads listener fallback:", error.message);
-        if (role === 'employee') {
-          setLeads(DEMO_LEADS.filter(l => l.assignedUserId === "demo-emp-1" || l.assignedUserId === uid));
-        } else {
-          setLeads(DEMO_LEADS);
-        }
-        setLoading(false);
-      });
+    return () => unsubscribe();
+    // `uid` is encoded in `key`, so the key alone identifies the subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
-      return () => unsubscribe();
-    } catch (e) {
-      setLoading(false);
-    }
-  }, [role, uid]);
+  if (IS_DEMO) {
+    const leads =
+      role === 'admin'
+        ? demoState.leads
+        : demoState.leads.filter((lead) => lead.assignedUserId === uid);
+    return { leads, loading: false, error: null };
+  }
 
-  return { leads, loading };
+  const current = state?.key === key ? state : null;
+
+  return {
+    leads: current?.leads ?? [],
+    loading: key !== 'idle' && current === null,
+    error: current?.error ?? null,
+  };
+}
+
+interface HistoryState {
+  key: string;
+  followUps: FollowUpRecord[];
+  events: AuditEventRecord[];
+  error: string | null;
 }
 
 export function useLeadHistory(leadId: string | null) {
-  const [followUps, setFollowUps] = useState<FollowUpRecord[]>(DEMO_FOLLOWUPS);
-  const [events, setEvents] = useState<AuditEventRecord[]>(DEMO_EVENTS);
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState<HistoryState | null>(null);
+  const demoState = useDemoState();
+  const key = leadId ?? 'idle';
 
   useEffect(() => {
-    if (!leadId) {
-      setFollowUps([]);
-      setEvents([]);
-      return;
-    }
+    if (IS_DEMO || !leadId) return;
 
-    setLoading(true);
+    let followUps: FollowUpRecord[] = [];
+    let events: AuditEventRecord[] = [];
+    let error: string | null = null;
 
-    try {
-      const fuRef = collection(db, 'leads', leadId, 'followUps');
-      const unsubFu = onSnapshot(fuRef, (snap) => {
-        if (!snap.empty) {
-          const list = snap.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as FollowUpRecord[];
-          
-          list.sort((a, b) => {
-            const aTime = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
-            const bTime = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
-            return bTime - aTime;
-          });
-          setFollowUps(list);
-        } else {
-          setFollowUps(DEMO_FOLLOWUPS);
-        }
-        setLoading(false);
-      }, () => {
-        setFollowUps(DEMO_FOLLOWUPS);
-        setLoading(false);
-      });
+    const publish = () => setState({ key: leadId, followUps, events, error });
 
-      const eventsRef = collection(db, 'leads', leadId, 'events');
-      const unsubEvents = onSnapshot(eventsRef, (snap) => {
-        if (!snap.empty) {
-          const list = snap.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as AuditEventRecord[];
-          setEvents(list);
-        } else {
-          setEvents(DEMO_EVENTS);
-        }
-      }, () => {
-        setEvents(DEMO_EVENTS);
-      });
+    const unsubFollowUps = onSnapshot(
+      query(collection(db, 'leads', leadId, 'followUps'), orderBy('occurredAt', 'desc')),
+      (snap) => {
+        followUps = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as FollowUpRecord[];
+        publish();
+      },
+      (err) => {
+        console.error('[useLeadHistory:followUps]', err);
+        followUps = [];
+        error = describeFirestoreError(err);
+        publish();
+      }
+    );
 
-      return () => {
-        unsubFu();
-        unsubEvents();
-      };
-    } catch (e) {
-      setFollowUps(DEMO_FOLLOWUPS);
-      setEvents(DEMO_EVENTS);
-      setLoading(false);
-    }
+    const unsubEvents = onSnapshot(
+      query(collection(db, 'leads', leadId, 'events'), orderBy('at', 'desc')),
+      (snap) => {
+        events = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as AuditEventRecord[];
+        publish();
+      },
+      (err) => {
+        console.error('[useLeadHistory:events]', err);
+        events = [];
+        publish();
+      }
+    );
+
+    return () => {
+      unsubFollowUps();
+      unsubEvents();
+    };
   }, [leadId]);
 
-  return { followUps, events, loading };
+  if (IS_DEMO) {
+    return {
+      followUps: leadId ? (demoState.followUps[leadId] ?? []) : [],
+      events: leadId ? (demoState.events[leadId] ?? []) : [],
+      loading: false,
+      error: null,
+    };
+  }
+
+  const current = state?.key === key ? state : null;
+
+  return {
+    followUps: current?.followUps ?? [],
+    events: current?.events ?? [],
+    loading: Boolean(leadId) && current === null,
+    error: current?.error ?? null,
+  };
+}
+
+export function describeFirestoreError(err: { code?: string; message?: string }): string {
+  if (err?.code === 'permission-denied') {
+    return 'You do not have access to this data. If you were recently given a role, sign out and sign in again.';
+  }
+  if (err?.code === 'failed-precondition') {
+    return 'This view needs a database index that has not been created yet. Deploy the Firestore indexes and try again.';
+  }
+  if (err?.code === 'unavailable') {
+    return 'Cannot reach the database. Check your connection.';
+  }
+  return err?.message ?? 'Could not load data.';
 }
